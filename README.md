@@ -17,11 +17,17 @@ python3 -m http.server 4173
 # then open http://localhost:4173
 ```
 
-## Deploy on Railway
-1. Push this repo to GitHub.
-2. On [Railway](https://railway.app), create a new project → **Deploy from GitHub repo** → select this repo.
-3. Railway detects `package.json` and runs `npm install && npm start`.
-4. A public URL is generated (e.g. `huang-lab-production-xxx.up.railway.app`).
+## Deploy on GitHub Pages
+1. Push this repo to GitHub (must be public for free Pages).
+2. **Settings → Pages → Source:** Deploy from a branch → **Branch:** `main` / `/(root)` → **Save**.
+3. After ~1 minute the site is live at `https://<user>.github.io/lab-website/`.
+
+The `.nojekyll` file prevents Jekyll from interfering with files starting with `_`.
+
+## Deploy on Railway (alternative)
+1. On [Railway](https://railway.app), create a new project → **Deploy from GitHub repo** → select this repo.
+2. Railway detects `package.json` and runs `npm install && npm start`.
+3. A public URL is generated automatically.
 
 ## Access (soft password gate)
 The site is gated by a password defined in `gate.js`. The current password is **`penn`**.
