@@ -36,9 +36,11 @@ Bypass link for direct access: append `?key=penn` to any page URL.
 > Note: the gate is client-side; the password is visible in the JS source. This is a soft access control, not real authentication.
 
 ## Review tool (mentor walkthrough)
-A floating **+ Add note** button on every page lets a reviewer annotate the site:
+A floating **+ Add note** button on every page lets reviewers annotate the site:
 - Click **+ Add note**, then click anywhere on the page
-- A modal appears with an auto-filled **Place** and a **Suggestion** textarea
-- Notes are stored in the reviewer's browser (`sessionStorage`)
-- Click **Notes (N)** to view, then **Copy as Claude prompt** to copy a paste-ready string for Claude Code, or **Export Markdown / JSON** to download a file
+- A modal appears with **Your name**, an auto-filled **Place**, and a **Suggestion** textarea
+- Notes are stored in a **shared Supabase table**, so every reviewer's comments are visible to everyone (and to you). See [`SETUP.md`](SETUP.md) for the one-time backend setup.
+- Click **Notes (N)** to view all comments; the panel shows a sync status and auto-refreshes (⟳ to force). Use **Copy as Claude prompt** for a paste-ready string, or **Export Markdown / JSON** to download a file
 - Click **×** on the FAB to hide the tool; reopen with `?review=on`
+
+> Until `review.js`'s `CONFIG` is filled in (see `SETUP.md`), the tool runs in **local-only** mode — comments stay in the reviewer's own browser and don't sync.

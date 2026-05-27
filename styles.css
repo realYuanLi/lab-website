@@ -758,6 +758,7 @@ body.review-on footer *:hover {
   justify-content: space-between;
   align-items: center;
 }
+.review-head-titles { display: flex; flex-direction: column; gap: 3px; }
 .review-panel header h3 {
   margin: 0;
   padding: 0;
@@ -766,6 +767,24 @@ body.review-on footer *:hover {
   font-weight: 400;
   font-size: 20px;
 }
+.review-sync-status {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--muted-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.review-sync-status::before {
+  content: "";
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--muted-2);
+}
+.review-sync-status.is-ok::before      { background: #2e9e5b; }
+.review-sync-status.is-warn::before    { background: #d99000; }
+.review-sync-status.is-pending::before { background: var(--muted); }
+.review-head-actions { display: flex; align-items: center; gap: 4px; }
 .review-panel header button {
   background: transparent;
   border: 0;
@@ -776,6 +795,7 @@ body.review-on footer *:hover {
   padding: 0 4px;
 }
 .review-panel header button:hover { color: var(--text); }
+.review-panel header #reviewRefresh { font-size: 18px; }
 .review-list {
   flex: 1;
   overflow-y: auto;

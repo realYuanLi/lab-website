@@ -3,13 +3,45 @@
    For mentor walkthroughs. Captures comments tied
    to clicked locations and exports as Markdown/JSON.
 
-   Notes are stored in localStorage on the reviewer's
-   browser. Exports include all notes across pages.
+   Comments are stored in a SHARED Supabase table so
+   that everyone's notes are visible to everyone (and
+   to you). localStorage is kept only as an offline
+   cache + fallback when the backend is unreachable.
    ───────────────────────────────────────────── */
 
 (() => {
+  /* ════════════════════════════════════════════
+     CONFIG — fill these in once.
+     1. Create a free project at https://supabase.com
+     2. SQL editor → run the schema in SETUP.md
+     3. Project Settings → API → copy the values below.
+     The anon key is a PUBLIC key (safe to commit); the
+     table is protected by Row Level Security policies.
+     ════════════════════════════════════════════ */
+  const CONFIG = {
+    supabaseUrl:     'https://peiebyowwshykuxorrof.supabase.co',
+    supabaseAnonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBlaWVieW93d3NoeWt1eG9ycm9mIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk4NDY1NjEsImV4cCI6MjA5NTQyMjU2MX0.6RPlpNlgbGVGMrMf5w79ROX6w-JRzSntsTIrTBoL6lU',
+    table:           'review_notes',
+    pollMs:          15000, // how often to re-fetch shared notes
+  };
+
   const STORAGE_KEY = 'huang_lab_review_notes_v1';
   const HIDDEN_KEY  = 'huang_lab_review_hidden_v1';
+  const AUTHOR_KEY  = 'huang_lab_review_author_v1';
+  const PENDING_KEY = 'huang_lab_review_pending_v1';
+
+  const remoteEnabled =
+    /^https:\/\/.+\.supabase\.co\/?$/.test(CONFIG.supabaseUrl) &&
+    CONFIG.supabaseAnonKey &&
+    !CONFIG.supabaseAnonKey.startsWith('YOUR_');
+
+  const restUrl  = `${CONFIG.supabaseUrl.replace(/\/$/, '')}/rest/v1/${CONFIG.table}`;
+  const sbHeaders = (extra = {}) => ({
+    apikey: CONFIG.supabaseAnonKey,
+    Authorization: `Bearer ${CONFIG.supabaseAnonKey}`,
+    'Content-Type': 'application/json',
+    ...extra,
+  });
 
   /* ── visibility gate ──
      The tool can be hidden by clicking × on the FAB.
@@ -25,15 +57,89 @@
     return;
   }
 
-  /* ── storage ── */
-  const load = () => {
+  /* ── local cache (offline view + fallback) ── */
+  const loadLocal = () => {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }
     catch { return []; }
   };
-  const save = (arr) => localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
-  const add  = (c)   => { const a = load(); a.push({ ...c, id: Date.now() + Math.random(), ts: new Date().toISOString() }); save(a); };
-  const del  = (id)  => save(load().filter(c => c.id !== id));
-  const clr  = ()    => save([]);
+  const saveLocal = (arr) => localStorage.setItem(STORAGE_KEY, JSON.stringify(arr));
+
+  /* ── pending queue: notes added while the backend was
+     unreachable, retried on the next successful sync. ── */
+  const loadPending = () => {
+    try { return JSON.parse(localStorage.getItem(PENDING_KEY) || '[]'); }
+    catch { return []; }
+  };
+  const savePending = (arr) => localStorage.setItem(PENDING_KEY, JSON.stringify(arr));
+
+  /* In-memory view of all notes. Kept in sync with the
+     backend; renders read from here so the UI stays fast. */
+  let notes = loadLocal();
+  let status = remoteEnabled ? 'connecting' : 'local'; // connecting | synced | offline | local
+
+  /* ── remote (Supabase REST) ── */
+  async function fetchRemote() {
+    const res = await fetch(`${restUrl}?select=*&order=ts.asc`, { headers: sbHeaders() });
+    if (!res.ok) throw new Error(`Supabase GET ${res.status}: ${await res.text()}`);
+    return res.json();
+  }
+  async function addRemote(c) {
+    const res = await fetch(restUrl, {
+      method: 'POST',
+      headers: sbHeaders({ Prefer: 'return=representation' }),
+      body: JSON.stringify({ page: c.page, place: c.place, suggestion: c.suggestion, author: c.author || null }),
+    });
+    if (!res.ok) throw new Error(`Supabase POST ${res.status}: ${await res.text()}`);
+    return (await res.json())[0];
+  }
+  async function delRemote(id) {
+    const res = await fetch(`${restUrl}?id=eq.${encodeURIComponent(id)}`, { method: 'DELETE', headers: sbHeaders() });
+    if (!res.ok) throw new Error(`Supabase DELETE ${res.status}: ${await res.text()}`);
+  }
+  async function clrRemote() {
+    // PostgREST refuses an unfiltered delete; match every real (uuid) row.
+    const res = await fetch(`${restUrl}?id=neq.00000000-0000-0000-0000-000000000000`, { method: 'DELETE', headers: sbHeaders() });
+    if (!res.ok) throw new Error(`Supabase DELETE-all ${res.status}: ${await res.text()}`);
+  }
+
+  /* ── sync: pull shared notes into the local view ── */
+  let syncing = false;
+  async function flushPending() {
+    const pending = loadPending();
+    if (!pending.length) return;
+    const remaining = [];
+    for (const n of pending) {
+      try { await addRemote(n); }
+      catch { remaining.push(n); } // keep for the next attempt
+    }
+    savePending(remaining);
+  }
+  async function sync({ quiet = false } = {}) {
+    if (!remoteEnabled) { notes = loadLocal(); status = 'local'; afterSync(); return; }
+    if (syncing) return;
+    syncing = true;
+    if (!quiet) { status = notes.length ? status : 'connecting'; updateStatus(); }
+    try {
+      await flushPending();
+      const remote = await fetchRemote();
+      const pending = loadPending();           // anything still un-pushed
+      notes = remote.concat(pending);          // keep showing the user's own
+      saveLocal(notes);                         // cache for offline viewing
+      status = pending.length ? 'offline' : 'synced';
+    } catch (err) {
+      console.warn('[review] sync failed, showing cached notes:', err);
+      notes = loadLocal();   // fall back to last known good
+      status = 'offline';
+    } finally {
+      syncing = false;
+      afterSync();
+    }
+  }
+  function afterSync() {
+    refreshCount();
+    if (panel && !panel.hidden) renderList();
+    updateStatus();
+  }
 
   /* ── build UI ── */
   const root = document.createElement('div');
@@ -53,6 +159,11 @@
       <form class="review-modal" id="reviewModal" autocomplete="off">
         <h3>Add review note</h3>
         <label class="review-field">
+          <span>Your name</span>
+          <input type="text" id="reviewAuthor" placeholder="e.g. Dr. Huang" required>
+          <small>Shown next to your comment so people know who left it. Remembered on this device.</small>
+        </label>
+        <label class="review-field">
           <span>Place</span>
           <input type="text" id="reviewPlace" required>
           <small>Auto-filled from where you clicked. You can edit this.</small>
@@ -70,8 +181,14 @@
 
     <aside class="review-panel" id="reviewPanel" hidden aria-label="Review notes panel">
       <header>
-        <h3>Review notes</h3>
-        <button type="button" id="reviewPanelClose" aria-label="Close">×</button>
+        <div class="review-head-titles">
+          <h3>Review notes</h3>
+          <span class="review-sync-status" id="reviewStatus"></span>
+        </div>
+        <div class="review-head-actions">
+          <button type="button" id="reviewRefresh" aria-label="Refresh" title="Refresh">⟳</button>
+          <button type="button" id="reviewPanelClose" aria-label="Close">×</button>
+        </div>
       </header>
       <div class="review-list" id="reviewList"></div>
       <footer>
@@ -92,16 +209,18 @@
   const tipBtn   = $('reviewTipBtn');
   const backdrop = $('reviewBackdrop');
   const modal    = $('reviewModal');
+  const authorIn = $('reviewAuthor');
   const placeIn  = $('reviewPlace');
   const suggIn   = $('reviewSuggestion');
   const panel    = $('reviewPanel');
   const listEl   = $('reviewList');
+  const statusEl = $('reviewStatus');
 
   let mode = 'off';        // 'off' | 'annotate'
   let lastTarget = null;
 
   /* ── state helpers ── */
-  const refreshCount = () => { fabCount.textContent = load().length; };
+  const refreshCount = () => { fabCount.textContent = notes.length; };
   const setMode = (next) => {
     mode = next;
     document.body.classList.toggle('review-on', mode === 'annotate');
@@ -109,6 +228,18 @@
     fabAnno.classList.toggle('is-on', mode === 'annotate');
     if (mode === 'off') hideTip();
   };
+  function updateStatus() {
+    if (!statusEl) return;
+    const map = {
+      connecting: { t: 'Connecting…',          c: 'is-pending' },
+      synced:     { t: 'Synced — shared',       c: 'is-ok' },
+      offline:    { t: 'Offline — cached only',  c: 'is-warn' },
+      local:      { t: 'Local only (not set up)', c: 'is-warn' },
+    };
+    const s = map[status] || map.local;
+    statusEl.textContent = s.t;
+    statusEl.className = `review-sync-status ${s.c}`;
+  }
 
   /* ── describe clicked location ── */
   function describeLocation(el) {
@@ -149,19 +280,20 @@
 
   /* ── modal ── */
   function openModal(target) {
-    placeIn.value = describeLocation(target);
-    suggIn.value  = '';
+    authorIn.value = localStorage.getItem(AUTHOR_KEY) || '';
+    placeIn.value  = describeLocation(target);
+    suggIn.value   = '';
     backdrop.hidden = false;
-    setTimeout(() => suggIn.focus(), 30);
+    setTimeout(() => (authorIn.value ? suggIn : authorIn).focus(), 30);
   }
   function closeModal() { backdrop.hidden = true; }
 
   /* ── panel ── */
-  function openPanel() { renderList(); panel.hidden = false; }
+  function openPanel() { renderList(); panel.hidden = false; sync(); }
   function closePanel() { panel.hidden = true; }
 
   function renderList() {
-    const arr = load();
+    const arr = notes;
     if (!arr.length) {
       listEl.innerHTML = '<p class="review-empty">No notes yet. Click <em>+ Add note</em>, then click anywhere on the page.</p>';
       return;
@@ -179,19 +311,29 @@
             <div class="review-place">${esc(c.place)}</div>
             <div class="review-suggestion">${esc(c.suggestion)}</div>
             <div class="review-row-meta">
-              <span>${new Date(c.ts).toLocaleString()}</span>
-              <button data-id="${c.id}" class="review-del" type="button">delete</button>
+              <span>${c.author ? esc(c.author) + ' · ' : ''}${c.ts ? new Date(c.ts).toLocaleString() : ''}</span>
+              <button data-id="${esc(c.id)}" class="review-del" type="button">delete</button>
             </div>
           </li>`).join('')}
         </ul>
       </div>`).join('');
     listEl.querySelectorAll('.review-del').forEach(btn => {
-      btn.addEventListener('click', () => {
-        del(Number(btn.dataset.id));
-        renderList();
-        refreshCount();
-      });
+      btn.addEventListener('click', () => removeNote(btn.dataset.id));
     });
+  }
+
+  async function removeNote(id) {
+    if (String(id).startsWith('local-')) {
+      // Never pushed yet — drop it from the retry queue so it can't resurrect.
+      savePending(loadPending().filter(n => String(n.id) !== String(id)));
+    } else if (remoteEnabled) {
+      try { await delRemote(id); }
+      catch (err) { alert('Could not delete from the shared store. Check your connection and try again.'); console.warn(err); return; }
+    }
+    notes = notes.filter(c => String(c.id) !== String(id));
+    saveLocal(notes);
+    renderList();
+    refreshCount();
   }
 
   /* ── export ── */
@@ -207,6 +349,7 @@
     arr.forEach((c, i) => {
       lines.push(`[${i + 1}] Page: ${c.page}`);
       lines.push(`    Location: ${c.place}`);
+      if (c.author) lines.push(`    From: ${c.author}`);
       lines.push(`    Suggestion: ${c.suggestion.replace(/\n/g, '\n                ')}`);
       lines.push('');
     });
@@ -250,7 +393,8 @@
         lines.push(`### ${i + 1}. ${c.place}`);
         lines.push('');
         lines.push(c.suggestion.split('\n').map(l => `> ${l}`).join('\n'));
-        lines.push('', `*Added ${new Date(c.ts).toLocaleString()}*`, '');
+        const meta = [c.author, c.ts ? new Date(c.ts).toLocaleString() : null].filter(Boolean).join(' · ');
+        lines.push('', `*${meta ? meta : 'Added'}*`, '');
       });
     });
     return lines.join('\n');
@@ -271,6 +415,7 @@
     if (confirm('Hide the review tool?\n\nTo bring it back later, open the site with "?review=on" at the end of the URL.')) {
       localStorage.setItem(HIDDEN_KEY, '1');
       root.remove();
+      clearInterval(pollTimer);
     }
   });
 
@@ -290,7 +435,6 @@
     openModal(lastTarget);
   });
 
-  // Dismiss tip if clicking outside in annotate mode happens elsewhere (handled by the capture above)
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       if (!backdrop.hidden) closeModal();
@@ -300,44 +444,72 @@
   });
 
   $('reviewCancel').addEventListener('click', closeModal);
-  modal.addEventListener('submit', (e) => {
+  modal.addEventListener('submit', async (e) => {
     e.preventDefault();
-    if (!placeIn.value.trim() || !suggIn.value.trim()) return;
-    add({
-      place: placeIn.value.trim(),
-      suggestion: suggIn.value.trim(),
+    const author     = authorIn.value.trim();
+    const place      = placeIn.value.trim();
+    const suggestion = suggIn.value.trim();
+    if (!place || !suggestion) return;
+    if (author) localStorage.setItem(AUTHOR_KEY, author);
+
+    const note = {
+      id: 'local-' + Date.now() + '-' + Math.random().toString(36).slice(2),
+      author, place, suggestion,
       page: location.pathname.split('/').pop() || 'index.html',
-    });
+      ts: new Date().toISOString(),
+    };
+
+    // Optimistic local insert so the UI feels instant.
+    notes.push(note);
+    saveLocal(notes);
+    refreshCount();
     closeModal();
     setMode('off');
-    refreshCount();
+
+    if (remoteEnabled) {
+      try { await addRemote(note); await sync({ quiet: true }); }
+      catch (err) {
+        console.warn(err);
+        savePending(loadPending().concat(note)); // retry on next sync
+        status = 'offline'; updateStatus();
+        alert('Saved on this device. The shared store was unreachable, so others can\'t see it yet — it will retry automatically the next time the tool connects.');
+      }
+    }
   });
 
   $('reviewPanelClose').addEventListener('click', closePanel);
+  $('reviewRefresh').addEventListener('click', () => sync());
   $('reviewCopyPrompt').addEventListener('click', async () => {
-    const arr = load();
-    if (!arr.length) return alert('No notes to copy.');
-    const ok = await copyToClipboard(toClaudePrompt(arr));
+    if (!notes.length) return alert('No notes to copy.');
+    const ok = await copyToClipboard(toClaudePrompt(notes));
     const btn = $('reviewCopyPrompt');
     const original = btn.textContent;
     btn.textContent = ok ? '✓ Copied to clipboard' : 'Copy failed — use Export Markdown';
     setTimeout(() => { btn.textContent = original; }, 2200);
   });
   $('reviewExportMd').addEventListener('click', () => {
-    const arr = load();
-    if (!arr.length) return alert('No notes to export.');
-    download(toMarkdown(arr), 'text/markdown', `huang-lab-review-${stamp()}.md`);
+    if (!notes.length) return alert('No notes to export.');
+    download(toMarkdown(notes), 'text/markdown', `huang-lab-review-${stamp()}.md`);
   });
   $('reviewExportJson').addEventListener('click', () => {
-    const arr = load();
-    if (!arr.length) return alert('No notes to export.');
-    download(JSON.stringify(arr, null, 2), 'application/json', `huang-lab-review-${stamp()}.json`);
+    if (!notes.length) return alert('No notes to export.');
+    download(JSON.stringify(notes, null, 2), 'application/json', `huang-lab-review-${stamp()}.json`);
   });
-  $('reviewClear').addEventListener('click', () => {
-    if (!load().length) return;
-    if (confirm('Clear all review notes? This cannot be undone.')) {
-      clr(); renderList(); refreshCount();
+  $('reviewClear').addEventListener('click', async () => {
+    if (!notes.length) return;
+    const msg = remoteEnabled
+      ? 'Clear ALL review notes for EVERYONE? This deletes them from the shared store and cannot be undone.'
+      : 'Clear all review notes? This cannot be undone.';
+    if (!confirm(msg)) return;
+    if (remoteEnabled) {
+      try { await clrRemote(); }
+      catch (err) { alert('Could not clear the shared store. Check your connection.'); console.warn(err); return; }
     }
+    notes = [];
+    savePending([]);
+    saveLocal(notes);
+    renderList();
+    refreshCount();
   });
 
   /* ── utils ── */
@@ -349,5 +521,16 @@
     return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}-${String(d.getHours()).padStart(2,'0')}${String(d.getMinutes()).padStart(2,'0')}`;
   }
 
+  /* ── boot ── */
   refreshCount();
+  updateStatus();
+  sync();
+
+  // Keep the shared notes fresh: poll while the tab is visible.
+  let pollTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') sync({ quiet: true });
+  }, CONFIG.pollMs);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') sync({ quiet: true });
+  });
 })();
