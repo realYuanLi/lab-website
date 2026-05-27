@@ -27,8 +27,9 @@
 
   const STORAGE_KEY = 'huang_lab_review_notes_v1';
   const HIDDEN_KEY  = 'huang_lab_review_hidden_v1';
-  const AUTHOR_KEY  = 'huang_lab_review_author_v1';
-  const PENDING_KEY = 'huang_lab_review_pending_v1';
+  const AUTHOR_KEY   = 'huang_lab_review_author_v1';
+  const PENDING_KEY  = 'huang_lab_review_pending_v1';
+  const MIGRATED_KEY = 'huang_lab_review_migrated_v1';
 
   const remoteEnabled =
     /^https:\/\/.+\.supabase\.co\/?$/.test(CONFIG.supabaseUrl) &&
@@ -71,6 +72,28 @@
     catch { return []; }
   };
   const savePending = (arr) => localStorage.setItem(PENDING_KEY, JSON.stringify(arr));
+
+  /* ── one-time migration ──
+     Before this version, notes lived only in each browser's
+     localStorage. On the first load after the upgrade, queue any
+     such pre-existing notes so they get pushed to the shared store
+     instead of being wiped by the first remote fetch. */
+  function migrateLegacyLocal() {
+    if (!remoteEnabled || localStorage.getItem(MIGRATED_KEY)) return;
+    const legacy = loadLocal();
+    if (legacy.length) {
+      const queued = legacy.map(n => ({
+        id: 'local-mig-' + Math.random().toString(36).slice(2),
+        author: n.author || '',
+        place: n.place || '',
+        suggestion: n.suggestion || '',
+        page: n.page || 'index.html',
+        ts: n.ts || new Date().toISOString(),
+      }));
+      savePending(loadPending().concat(queued));
+    }
+    localStorage.setItem(MIGRATED_KEY, '1');
+  }
 
   /* In-memory view of all notes. Kept in sync with the
      backend; renders read from here so the UI stays fast. */
@@ -522,6 +545,7 @@
   }
 
   /* ── boot ── */
+  migrateLegacyLocal();
   refreshCount();
   updateStatus();
   sync();
